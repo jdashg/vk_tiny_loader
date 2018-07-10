@@ -1,7 +1,9 @@
 #ifndef UTILS_H
 #define UTILS_H
 
+#include <algorithm>
 #include <iosfwd>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -78,5 +80,18 @@ public:
       return ret;
    }
 };
+
+
+std::string to_string(const std::wstring& in);
+std::wstring to_wstring(const std::string& in);
+
+inline std::string to_string(const std::string& in) { return in; }
+inline std::wstring to_wstring(const std::wstring& in) { return in; }
+
+template<typename T>
+std::unique_ptr<T> as_unique(T* const p)
+{
+   return std::unique_ptr<T>(p);
+}
 
 #endif // UTILS_H

@@ -4,13 +4,6 @@
 #include <iostream>
 #include "tjson_cpp/tjson.h"
 
-#ifdef __cpp_lib_filesystem
-#include <filesystem>
-namespace fs = std::filesystem;
-#else
-#include <dirent.h>
-#endif
-
 #ifdef __APPLE__
 #include "CoreFoundation/CoreFoundation.h"
 #endif
@@ -18,6 +11,8 @@ namespace fs = std::filesystem;
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include "Windows.h"
+#else
+#include <dirent.h>
 #endif
 
 #ifdef _WIN32
@@ -45,16 +40,23 @@ ListDir(const path_string& path_str)
 {
    std::vector<path_string> ret;
 
-#ifdef __cpp_lib_filesystem
-   const auto path = fs::path(path_str);
-   if (!fs::is_directory(path))
+#ifdef _WIN32
+   WIN32_FIND_DATAW data;
+   const auto search_str = path_str + L"\\*";
+   printf("%ls:\n", search_str.c_str());
+   const auto handle = FindFirstFileW(search_str.c_str(), &data);
+   if (handle == INVALID_HANDLE_VALUE)
       return nullptr;
 
-   const auto options = fs::directory_options::skip_permission_denied;
-   for (const auto& f : fs::directory_iterator(path, options)) {
-      const auto& subpath = f.path();
-      ret.push_back(subpath.native());
+   while (true) {
+      const auto subpath = path_str + L"\\" + data.cFileName;
+      printf("   %ls\n", subpath.c_str());
+      ret.push_back(subpath);
+      if (!FindNextFileW(handle, &data))
+         break;
    }
+   FindClose(handle);
+
 #else
    auto dir = opendir(path_str.c_str());
    if (!dir)
@@ -93,19 +95,21 @@ public:
       }
    }
 
-   unique_ptr<RegNode> Open(const wchar_t* const subkey) const {
+   std::unique_ptr<RegNode> Open(const wchar_t* const subkey) const {
       HKEY subhandle;
       const auto res = RegOpenKeyExW(handle_, subkey, 0, KEY_READ, &subhandle);
       if (res != ERROR_SUCCESS)
          return nullptr;
-      return new RegNode(subhandle, true);
+      return as_unique(new RegNode(subhandle, true));
    }
 
    std::vector<std::wstring> EnumSubkeys() const {
       std::vector<std::wstring> ret;
-      wchar_t subkey_buff[255 + 1]; // Max key size is 255.
-      for (uint32_t i; true; i++) {
-         const auto res = RegEnumKeyExW(handle_, i, subkey_buff, nullptr, nullptr,
+      constexpr size_t buff_size = 255 + 1;
+      wchar_t subkey_buff[buff_size]; // Max key size is 255.
+      for (DWORD i = 0; true; i++) {
+         DWORD size = buff_size;
+         const auto res = RegEnumKeyExW(handle_, i, subkey_buff, &size, nullptr,
                                         nullptr, nullptr, nullptr);
          if (res != ERROR_SUCCESS)
             break;
@@ -117,13 +121,13 @@ public:
    std::vector<uint8_t> GetValueBytes(const wchar_t* const subkey,
                                       const wchar_t* const name) const
    {
-      uint32_t size = 0;
+      DWORD size = 0;
       auto res = RegGetValueW(handle_, subkey, name, RRF_RT_ANY, nullptr, nullptr, &size);
       if (res != ERROR_SUCCESS)
          return {};
 
-      const auto ret = std::vector<uint8_t>(size);
-      auto res = RegGetValueW(handle_, subkey, name, RRF_RT_ANY, nullptr, ret.data(), &size);
+      auto ret = std::vector<uint8_t>(size);
+      res = RegGetValueW(handle_, subkey, name, RRF_RT_ANY, nullptr, ret.data(), &size);
       if (res != ERROR_SUCCESS)
          return {};
 
@@ -143,7 +147,7 @@ LoadFromWindowsRegistry()
    std::vector<std::wstring> paths_from_reg;
 
    [&]() {
-      const auto class_node = local_machine->Open(kRegClassPath);
+      const auto class_node = local_machine.Open(kRegPath);
       if (!class_node)
          return;
 
@@ -156,7 +160,6 @@ LoadFromWindowsRegistry()
          for (const auto& k : subkeys) {
             if (k.length() != 4)
                continue;
-
             const auto bytes = guid_node->GetValueBytes(k.c_str(), L"VulkanDriverName");
             if (!bytes.size())
                return;
@@ -177,7 +180,7 @@ LoadFromWindowsRegistry()
    }();
 
    [&]() {
-      const auto drivers_node = local_machine->Open(kLegacyRegPath);
+      const auto drivers_node = local_machine.Open(kLegacyRegPath);
       if (!drivers_node)
          return;
 
@@ -185,9 +188,11 @@ LoadFromWindowsRegistry()
       uint32_t val_val = -1;
 
       for (uint32_t i = 0; true; i++) {
-         const auto res = RegEnumValueW(drivers_node.handle_, i, val_name_buff.data(),
-                                        val_name_buff.size(), nullptr, nullptr, &val_val,
-                                        sizeof(val_val));
+         DWORD name_size = val_name_buff.size();
+         DWORD val_size = sizeof(val_val);
+         const auto res = RegEnumValueW(drivers_node->handle_, i, val_name_buff.data(),
+                                        &name_size, nullptr, nullptr, (BYTE*)&val_val,
+                                        &val_size);
          if (res == ERROR_NO_MORE_ITEMS)
             break;
          if (res != ERROR_SUCCESS)
@@ -221,7 +226,7 @@ SplitString(const std::string& str, const char delim)
 }
 
 std::vector<path_string>
-EnumIcdDirs()
+EnumIcdsPaths()
 {
    std::vector<path_string> ret;
 
@@ -246,6 +251,7 @@ EnumIcdDirs()
    ret.insert(ret.end(), wpaths.begin(), wpaths.end());
 #endif // _WIN32
 
+   std::vector<path_string> icd_dirs;
 #ifdef __APPLE__
    /* <bundle>/Contents/Resources/vulkan/icd.d
     * /etc/vulkan/icd.d
@@ -268,10 +274,10 @@ EnumIcdDirs()
          return;
 
       const auto path = std::string((const char*)buff.data()) + "/Contents/Resources/vulkan/icd.d";
-      ret.push_back(path);
+      icd_dirs.push_back(path);
    }();
-   ret.push_back("/etc/vulkan/icd.d");
-   ret.push_back("/usr/local/share/vulkan/icd.d");
+   icd_dirs.push_back("/etc/vulkan/icd.d");
+   icd_dirs.push_back("/usr/local/share/vulkan/icd.d");
 
 
 #endif // __APPLE__
@@ -284,13 +290,13 @@ EnumIcdDirs()
     * /usr/share/vulkan/icd.d
     * $HOME/.local/share/vulkan/icd.d
     */
-   ret.push_back("/usr/local/etc/vulkan/icd.d");
-   ret.push_back("/usr/local/share/vulkan/icd.d");
-   ret.push_back("/etc/vulkan/icd.d");
+   icd_dirs.push_back("/usr/local/etc/vulkan/icd.d");
+   icd_dirs.push_back("/usr/local/share/vulkan/icd.d");
+   icd_dirs.push_back("/etc/vulkan/icd.d");
 #endif // __linux
 
 #ifndef _WIN32
-   ret.push_back("/usr/share/vulkan/icd.d");
+   icd_dirs.push_back("/usr/share/vulkan/icd.d");
 
    [&]() {
       const auto env = getenv("HOME");
@@ -298,9 +304,16 @@ EnumIcdDirs()
          return;
 
       const auto path = std::string(env) + "/.local/share/vulkan/icd.d";
-      ret.push_back(path);
+      icd_dirs.push_back(path);
    }();
 #endif // !_WIN32
+
+   for (const auto& dir : icd_dirs) {
+      const auto files = ListDir(dir);
+      if (!files)
+         continue;
+      ret.insert(ret.end(), files->begin(), files->end());
+   }
 
    return ret;
 }
@@ -361,33 +374,27 @@ std::vector<IcdInfo>
 EnumIcds()
 {
    std::vector<IcdInfo> ret;
-
-   const path_string kJsonExt(".json");
-   const auto dirs = EnumIcdDirs();
-   for (const auto& dir : dirs) {
-      const auto files = ListDir(dir);
-      if (!files)
+   static const std::string kJsonExtC = ".json";
+   const path_string kJsonExt(kJsonExtC.begin(), kJsonExtC.end());
+   const auto files = EnumIcdsPaths();
+   for (const auto& file : files) {
+      if (!EndsWith(file, kJsonExt))
          continue;
 
-      for (const auto& file : *files) {
-         if (!EndsWith(file, kJsonExt))
-            continue;
-
-         const auto read = Read(file, std::ios_base::binary);
-         if (!read) {
-            std::cout << "Failed to read " << file << "." << "\n";
-            continue;
-         }
-         const auto& bytes = *read;
-
-         std::string err;
-         const auto info = ParseIcd(bytes, &err);
-         if (!info) {
-            std::cout << "Failed to parse ICD " << file << ": " << err << "\n";
-            continue;
-         }
-         ret.push_back(*info);
+      const auto read = Read(file, std::ios_base::binary);
+      if (!read) {
+         std::cout << "Warning: Failed to read " << to_string(file) << "." << "\n";
+         continue;
       }
+      const auto& bytes = *read;
+
+      std::string err;
+      const auto info = ParseIcd(bytes, &err);
+      if (!info) {
+         std::cout << "Warning: Failed to parse ICD " << to_string(file) << ": " << err << "\n";
+         continue;
+      }
+      ret.push_back(*info);
    }
 
    return ret;
