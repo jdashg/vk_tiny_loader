@@ -1,0 +1,6 @@
+[submodule "Vulkan-Headers"]
+	path = Vulkan-Headers
+	url = https://github.com/KhronosGroup/Vulkan-Headers.git
+[submodule "tjson_cpp"]
+	path = tjson_cpp
+	url = https://github.com/jdashg/tjson_cpp.git
