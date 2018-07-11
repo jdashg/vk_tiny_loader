@@ -8,8 +8,9 @@
 
 struct IcdInfo final
 {
+   std::string json_path;
    std::string library_path;
-   SemanticVersion api_version;
+   SemanticVersion vk_api_version;
 };
 
 std::vector<IcdInfo> EnumIcds();

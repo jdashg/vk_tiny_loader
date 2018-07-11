@@ -366,7 +366,7 @@ ParseIcd(const std::vector<uint8_t>& bytes, std::string* const err)
 
    auto ret = std::make_unique<IcdInfo>();
    ret->library_path = library_path;
-   ret->api_version = SemanticVersion::Parse(api_version);
+   ret->vk_api_version = SemanticVersion::Parse(api_version);
    return ret;
 }
 
@@ -394,6 +394,7 @@ EnumIcds()
          std::cout << "Warning: Failed to parse ICD " << to_string(file) << ": " << err << "\n";
          continue;
       }
+      info->json_path = to_string(file);
       ret.push_back(*info);
    }
 

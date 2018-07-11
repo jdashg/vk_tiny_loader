@@ -8,7 +8,7 @@ main(const int argc, const char* const argv[])
 {
    const auto icds = EnumIcds();
    for (const auto& icd : icds) {
-      printf("%s:\n   %s\n", icd.library_path.c_str(), icd.api_version.str().c_str());
+      printf("%s:\n   Vulkan %s\n", icd.library_path.c_str(), icd.vk_api_version.str().c_str());
    }
    return 0;
 }
