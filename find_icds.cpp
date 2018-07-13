@@ -15,50 +15,34 @@
 #include <dirent.h>
 #endif
 
-#ifdef _WIN32
-typedef std::wstring path_string;
-#else
-typedef std::string path_string;
-#endif
+// -
 
-static std::unique_ptr<std::vector<uint8_t>>
-Read(const path_string& path, std::ios_base::openmode extra_flags = 0)
+static std::unique_ptr<std::vector<std::string>>
+list_dir(const std::string& dir_path)
 {
-   const auto flags = std::ios_base::in | extra_flags;
-   std::ifstream stream(path, flags);
-
-   std::string err;
-   auto bytes = ReadBytes(&stream, &err);
-
-   if (err.size())
-      return nullptr;
-   return std::make_unique<std::vector<uint8_t>>(std::move(bytes));
-}
-
-static std::unique_ptr<std::vector<path_string>>
-ListDir(const path_string& path_str)
-{
-   std::vector<path_string> ret;
+   std::vector<std::string> ret;
 
 #ifdef _WIN32
+   const auto dir_wpath = to_wstring(dir_path);
    WIN32_FIND_DATAW data;
-   const auto search_str = path_str + L"\\*";
+   const auto search_str = dir_wpath + L"\\*";
    printf("%ls:\n", search_str.c_str());
    const auto handle = FindFirstFileW(search_str.c_str(), &data);
    if (handle == INVALID_HANDLE_VALUE)
       return nullptr;
 
    while (true) {
-      const auto subpath = path_str + L"\\" + data.cFileName;
-      printf("   %ls\n", subpath.c_str());
-      ret.push_back(subpath);
+      const auto file_name = to_string(data.cFileName);
+      auto subpath = path_concat(dir_path, file_name);
+      printf("   %s\n", subpath.c_str());
+      ret.push_back(std::move(subpath));
       if (!FindNextFileW(handle, &data))
          break;
    }
    FindClose(handle);
 
 #else
-   auto dir = opendir(path_str.c_str());
+   auto dir = opendir(dir_path.c_str());
    if (!dir)
       return nullptr;
 
@@ -66,13 +50,13 @@ ListDir(const path_string& path_str)
       const auto entry = readdir(dir);
       if (!entry)
          break;
-      const auto subpath = path_str + "/" + entry->d_name;
-      ret.push_back(subpath);
+      auto subpath = path_concat(dir_path, entry->d_name);
+      ret.push_back(std::move(subpath));
    }
    closedir(dir);
 #endif
 
-   return std::make_unique<std::vector<path_string>>(std::move(ret));
+   return std::make_unique<std::vector<std::string>>(std::move(ret));
 }
 
 #ifdef _WIN32
@@ -95,7 +79,7 @@ public:
       }
    }
 
-   std::unique_ptr<RegNode> Open(const wchar_t* const subkey) const {
+   std::unique_ptr<RegNode> open(const wchar_t* const subkey) const {
       HKEY subhandle;
       const auto res = RegOpenKeyExW(handle_, subkey, 0, KEY_READ, &subhandle);
       if (res != ERROR_SUCCESS)
@@ -103,7 +87,7 @@ public:
       return as_unique(new RegNode(subhandle, true));
    }
 
-   std::vector<std::wstring> EnumSubkeys() const {
+   std::vector<std::wstring> enum_subkeys() const {
       std::vector<std::wstring> ret;
       constexpr size_t buff_size = 255 + 1;
       wchar_t subkey_buff[buff_size]; // Max key size is 255.
@@ -118,8 +102,8 @@ public:
       return ret;
    }
 
-   std::vector<uint8_t> GetValueBytes(const wchar_t* const subkey,
-                                      const wchar_t* const name) const
+   std::vector<uint8_t> value_bytes(const wchar_t* const subkey,
+                                    const wchar_t* const name) const
    {
       DWORD size = 0;
       auto res = RegGetValueW(handle_, subkey, name, RRF_RT_ANY, nullptr, nullptr, &size);
@@ -135,32 +119,32 @@ public:
    }
 };
 
-static const auto kRegPath = L"System\\CurrentControlSet\\Control\\Class";
-static const auto kGuidDisplay = L"{4d36e968-e325-11ce-bfc1-08002be10318}";
-static const auto kGuidSoftwareComponent = L"{5c4c3332-344d-483c-8739-259e934c9cc8}";
-static const auto kLegacyRegPath = L"SOFTWARE\\Khronos\\Vulkan\\Drivers";
+static const auto REG_PATH = L"System\\CurrentControlSet\\Control\\Class";
+static const auto GUID_DISPLAY = L"{4d36e968-e325-11ce-bfc1-08002be10318}";
+static const auto GUID_SOFTWARE_COMPONENT = L"{5c4c3332-344d-483c-8739-259e934c9cc8}";
+static const auto LEGACY_REG_PATH = L"SOFTWARE\\Khronos\\Vulkan\\Drivers";
 
 static std::vector<std::wstring>
-LoadFromWindowsRegistry()
+load_from_registry()
 {
    const auto local_machine = RegNode(HKEY_LOCAL_MACHINE);
    std::vector<std::wstring> paths_from_reg;
 
    [&]() {
-      const auto class_node = local_machine.Open(kRegPath);
+      const auto class_node = local_machine.Open(REG_PATH);
       if (!class_node)
          return;
 
       const auto fn_for_guid = [&](const wchar_t* const guid) {
-         const auto guid_node = class_node->Open(guid);
+         const auto guid_node = class_node->open(guid);
          if (!guid_node)
             return;
 
-         const auto subkeys = guid_node->EnumSubkeys();
+         const auto subkeys = guid_node->enum_subkeys();
          for (const auto& k : subkeys) {
             if (k.length() != 4)
                continue;
-            const auto bytes = guid_node->GetValueBytes(k.c_str(), L"VulkanDriverName");
+            const auto bytes = guid_node->value_bytes(k.c_str(), L"VulkanDriverName");
             if (!bytes.size())
                return;
 
@@ -175,12 +159,12 @@ LoadFromWindowsRegistry()
             }
          }
       };
-      fn_for_guid(kGuidDisplay);
-      fn_for_guid(kGuidSoftwareComponent);
+      fn_for_guid(GUID_DISPLAY);
+      fn_for_guid(GUID_SOFTWARE_COMPONENT);
    }();
 
    [&]() {
-      const auto drivers_node = local_machine.Open(kLegacyRegPath);
+      const auto drivers_node = local_machine.Open(LEGACY_REG_PATH);
       if (!drivers_node)
          return;
 
@@ -210,7 +194,7 @@ LoadFromWindowsRegistry()
 #endif // _WIN32
 
 static std::vector<std::string>
-SplitString(const std::string& str, const char delim)
+split_string(const std::string& str, const char delim)
 {
    std::vector<std::string> ret;
    const auto end = str.end();
@@ -225,10 +209,10 @@ SplitString(const std::string& str, const char delim)
    return ret;
 }
 
-std::vector<path_string>
-EnumIcdsPaths()
+std::vector<std::string>
+enum_icd_paths()
 {
-   std::vector<path_string> ret;
+   std::vector<std::string> ret;
 
    // --
 
@@ -237,21 +221,23 @@ EnumIcdsPaths()
       if (!env)
          return;
 
-      const auto paths = SplitString(env, ':');
+      const auto paths = split_string(env, ':');
       for (const auto& path : paths) {
-         const auto conv = path_string(path.c_str(), path.c_str() + path.size());
-         ret.push_back(conv);
+         ret.push_back(path);
       }
    }();
 
    // --
 
 #ifdef _WIN32
-   const auto wpaths = LoadFromWindowsRegistry();
-   ret.insert(ret.end(), wpaths.begin(), wpaths.end());
+   const auto wpaths = load_from_registry();
+   for (const auto& wpath : wpaths) {
+      auto path = to_string(wpath);
+      ret.push_back(std::move(path));
+   }
 #endif // _WIN32
 
-   std::vector<path_string> icd_dirs;
+   std::vector<std::string> icd_dirs;
 #ifdef __APPLE__
    /* <bundle>/Contents/Resources/vulkan/icd.d
     * /etc/vulkan/icd.d
@@ -308,32 +294,32 @@ EnumIcdsPaths()
    }();
 #endif // !_WIN32
 
+   static const std::string JSON_EXT = ".json";
+
    for (const auto& dir : icd_dirs) {
-      const auto files = ListDir(dir);
+      const auto files = list_dir(dir);
       if (!files)
          continue;
-      ret.insert(ret.end(), files->begin(), files->end());
+
+      for (const auto& file : *files) {
+         if (!ends_with(file, JSON_EXT))
+            continue;
+         ret.push_back(file);
+      }
    }
 
    return ret;
 }
 
-template<typename T>
-static bool
-EndsWith(const T& str, const T& needle)
+/*static*/ std::unique_ptr<IcdInfo>
+IcdInfo::from(const std::string& json_path, std::string* const err)
 {
-   if (str.size() < needle.size())
-      return false;
-   const auto tail = str.substr(str.size() - needle.size());
-   return tail == needle;
-}
+   const auto bytes = read_bytes(json_path, err, std::ios_base::binary);
+   if (!bytes)
+      return nullptr;
 
-static std::unique_ptr<IcdInfo>
-ParseIcd(const std::vector<uint8_t>& bytes, std::string* const err)
-{
-   std::vector<std::string> errs;
-   const auto json = tjson::read((const char*)bytes.data(),
-                                 (const char*)bytes.data() + bytes.size(), &errs);
+   const auto json = tjson::read((const char*)bytes->data(),
+                                 (const char*)bytes->data() + bytes->size(), err);
    /* icd.d/<*>.json
    {
       "file_format_version": "1.0.0",
@@ -364,39 +350,14 @@ ParseIcd(const std::vector<uint8_t>& bytes, std::string* const err)
       return nullptr;
    }
 
-   auto ret = std::make_unique<IcdInfo>();
-   ret->library_path = library_path;
-   ret->vk_api_version = SemanticVersion::Parse(api_version);
-   return ret;
-}
-
-std::vector<IcdInfo>
-EnumIcds()
-{
-   std::vector<IcdInfo> ret;
-   static const std::string kJsonExtC = ".json";
-   const path_string kJsonExt(kJsonExtC.begin(), kJsonExtC.end());
-   const auto files = EnumIcdsPaths();
-   for (const auto& file : files) {
-      if (!EndsWith(file, kJsonExt))
-         continue;
-
-      const auto read = Read(file, std::ios_base::binary);
-      if (!read) {
-         std::cout << "Warning: Failed to read " << to_string(file) << "." << "\n";
-         continue;
-      }
-      const auto& bytes = *read;
-
-      std::string err;
-      const auto info = ParseIcd(bytes, &err);
-      if (!info) {
-         std::cout << "Warning: Failed to parse ICD " << to_string(file) << ": " << err << "\n";
-         continue;
-      }
-      info->json_path = to_string(file);
-      ret.push_back(*info);
+   if (library_path.size() && library_path[0] == '.') {
+      const auto json_dir = path_parent(json_path);
+      library_path = path_concat(json_dir, library_path);
    }
 
+   auto ret = std::make_unique<IcdInfo>();
+   ret->json_path = json_path;
+   ret->library_path = library_path;
+   ret->vk_api_version = api_version;
    return ret;
 }

@@ -7,9 +7,14 @@
 #include <string>
 #include <vector>
 
-size_t NextPOT(size_t x);
+size_t next_pot(size_t x);
 
-std::vector<uint8_t> ReadBytes(std::istream* in, std::string* out_err);
+std::unique_ptr<std::vector<uint8_t>>
+read_bytes(std::istream* in, std::string* out_err);
+
+std::unique_ptr<std::vector<uint8_t>>
+read_bytes(const std::string& path, std::string* out_err,
+           /*std::ios_base::openmode*/ uint32_t extra_flags = 0);
 
 // -
 
@@ -93,5 +98,14 @@ std::unique_ptr<T> as_unique(T* const p)
 {
    return std::unique_ptr<T>(p);
 }
+
+bool
+ends_with(const std::string& str, const std::string& needle);
+
+std::string
+path_parent(const std::string& path);
+
+std::string
+path_concat(const std::string& a, const std::string& b);
 
 #endif // UTILS_H
